@@ -223,7 +223,8 @@ jobs:
           cp -r /tmp/srs/geoip   release/sing-box/geoip
           sha256sum release/geosite.dat > release/geosite.dat.sha256
           sha256sum release/geoip.dat  > release/geoip.dat.sha256
-          ls -l release/ release/sing-box/geosite release/sing-box/geoip | head -60
+          echo "release: geosite .srs=$(find release/sing-box/geosite -name '*.srs' | wc -l), geoip .srs=$(find release/sing-box/geoip -name '*.srs' | wc -l)"
+          ls -l release/
 
       - name: Push to release branch
         run: |
