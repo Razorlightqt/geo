@@ -268,14 +268,17 @@ jobs:
             if [ "${#chunk[@]}" -ge 50 ]; then purge_chunk "${chunk[@]}"; chunk=(); fi
           done
           [ "${#chunk[@]}" -gt 0 ] && purge_chunk "${chunk[@]}"
-          # Verify .dat re-cache as 200 (ловит класс «stale 403 после ужатия»); до 6×5с.
+          # Verify .dat re-cache as 200 (ловит класс «stale 403 после ужатия»). Батч-POST
+          # для крупного geoip обрабатывается асинхронно и медленно → внутри цикла
+          # дополнительно дёргаем быстрый GET-purge до 200; до 10×6с.
           for f in geosite.dat geoip.dat; do
             ok=0
-            for i in 1 2 3 4 5 6; do
+            for i in $(seq 1 10); do
               code=$(curl -s -o /dev/null -w '%{http_code}' "https://cdn.jsdelivr.net/gh/${REPO}@release/${f}" || echo 000)
               echo "verify ${f} (try ${i}): ${code}"
               if [ "$code" = "200" ]; then ok=1; break; fi
-              sleep 5
+              curl -s -o /dev/null "https://purge.jsdelivr.net/gh/${REPO}@release/${f}" || true
+              sleep 6
             done
             [ "$ok" = "1" ] || { echo "ERROR: ${f} not 200 on jsDelivr after purge"; exit 1; }
           done
