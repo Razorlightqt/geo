@@ -115,15 +115,15 @@ jobs:
           set -euo pipefail
           echo "== canonical geoip (sample) =="
           for c in RU PRIVATE CN TELEGRAM CLOUDFLARE; do
-            if strings geoip.dat | grep -qx "$c"; then echo "  ok: $c"; else echo "  MISSING: $c"; fi
+            if strings -n 2 geoip.dat | grep -qx "$c"; then echo "  ok: $c"; else echo "  MISSING: $c"; fi
           done
           echo "== roscomvpn-prefixed geoip (sample) =="
           for c in ROSCOMVPN-WHITELIST ROSCOMVPN-DIRECT ROSCOMVPN-PRIVATE; do
-            if strings geoip.dat | grep -qx "$c"; then echo "  ok: $c"; else echo "  MISSING: $c"; fi
+            if strings -n 2 geoip.dat | grep -qx "$c"; then echo "  ok: $c"; else echo "  MISSING: $c"; fi
           done
-          strings geoip.dat | grep -qx RU
-          strings geoip.dat | grep -qx ROSCOMVPN-WHITELIST
-          echo "roscomvpn geoip category count: $(strings geoip.dat | grep -c '^ROSCOMVPN-' || true)"
+          strings -n 2 geoip.dat | grep -qx RU
+          strings -n 2 geoip.dat | grep -qx ROSCOMVPN-WHITELIST
+          echo "roscomvpn geoip category count: $(strings -n 2 geoip.dat | grep -c '^ROSCOMVPN-' || true)"
 
       # ---------- publish ----------
       - name: Set tag
