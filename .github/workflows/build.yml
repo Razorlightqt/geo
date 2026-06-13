@@ -91,6 +91,55 @@ jobs:
           strings geosite.dat | grep -qx ROSCOMVPN-CATEGORY-RU
           echo "roscomvpn geosite category count: $(strings geosite.dat | grep -c '^ROSCOMVPN-' || true)"
 
+      # ---------- geosite .srs (sing-box) ----------
+      - name: Install sing-box (compile .srs, prod-compatible 1.13.13)
+        run: |
+          set -euo pipefail
+          $CURL https://sing-box.app/install.sh | sudo -E sh -s -- --version 1.13.13
+          sing-box version
+
+      - name: Build geosite .srs (curated set, includes resolved via exportlists)
+        run: |
+          set -euo pipefail
+          # Curated canonical services + all roscomvpn-* (overlay). NOT the full 1496
+          # (would mean a huge release + jsDelivr purge rate-limit). Expand as needed.
+          SRS="discord instagram twitter tiktok openai spotify reddit youtube google netflix telegram github steam whatsapp signal facebook meta cloudflare category-ads-all category-ru category-gov-ru"
+          for f in roscomvpn-geosite/data/*; do SRS="$SRS roscomvpn-$(basename "$f")"; done
+          list=$(echo $SRS | tr ' ' ',')
+
+          # exportlists flattens include: into plaintext "<type>:<value>[:@attr]" per category.
+          rm -rf /tmp/lists /tmp/srs && mkdir -p /tmp/lists /tmp/srs
+          pushd community >/dev/null
+          go run ./ -outputdir=/tmp/lists -exportlists="$list" >/dev/null
+          popd >/dev/null
+
+          n=0; skip=0
+          for name in $SRS; do
+            lc=$(echo "$name" | tr 'A-Z' 'a-z')
+            txt="/tmp/lists/${lc}.txt"
+            if [ ! -s "$txt" ]; then echo "  skip (no export): $name"; skip=$((skip+1)); continue; fi
+            awk '{ i=index($0,":"); if(i==0) next; t=substr($0,1,i-1); r=substr($0,i+1); j=index(r,":@"); if(j>0) r=substr(r,1,j-1); if(r=="") next;
+                   if(t=="domain") print "suffix\t" r; else if(t=="full") print "domain\t" r; else if(t=="keyword") print "keyword\t" r; else if(t=="regexp") print "regex\t" r }' "$txt" \
+            | jq -Rn '
+                def add($k; $v): .rules[0][$k] = ((.rules[0][$k] // []) + [$v]);
+                reduce (inputs | split("\t")) as $it ({"version":3,"rules":[{}]};
+                  if   $it[0]=="domain"  then add("domain";         $it[1])
+                  elif $it[0]=="suffix"  then add("domain_suffix";  $it[1])
+                  elif $it[0]=="keyword" then add("domain_keyword"; $it[1])
+                  elif $it[0]=="regex"   then add("domain_regex";   $it[1])
+                  else . end)
+                | .rules[0] |= with_entries(select(.value | length > 0))
+                | if (.rules[0] | length) == 0 then .rules = [] else . end
+              ' > /tmp/j.json
+            sing-box rule-set compile --output "/tmp/srs/${name}.srs" /tmp/j.json
+            n=$((n+1))
+          done
+          echo "compiled ${n} geosite .srs, skipped ${skip}"
+          ls -l /tmp/srs | head -30
+          # gate: a roscomvpn-* and a canonical must exist
+          test -s /tmp/srs/roscomvpn-category-ru.srs
+          test -s /tmp/srs/discord.srs
+
       # ---------- geoip ----------
       - name: Build merged geoip.dat
         run: |
@@ -141,12 +190,13 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf release
-          mkdir -p release
+          mkdir -p release/sing-box
           cp ./geosite.dat release/
           cp ./geoip.dat release/
+          cp /tmp/srs/*.srs release/sing-box/
           sha256sum release/geosite.dat > release/geosite.dat.sha256
           sha256sum release/geoip.dat  > release/geoip.dat.sha256
-          ls -l release/
+          ls -l release/ release/sing-box/ | head -40
 
       - name: Push to release branch
         run: |
