@@ -251,12 +251,12 @@ jobs:
           REPO="${{ github.repository }}"
           # Purge EVERY published file (incl. sing-box .srs) — иначе jsDelivr держит
           # stale объект (поймано: geoip.dat >20 MiB версия отдавала 403 после ужатия).
-          mapfile -t paths < <(cd release && find . -type f | sed "s|^\./|/gh/${REPO}@release/|" | sort)
+          mapfile -t paths < <(cd release && find . -type f -not -path './.git/*' | sed "s|^\./|/gh/${REPO}@release/|" | sort)
           echo "files to purge: ${#paths[@]}"
           # Batch purge API (POST) — без per-file GET rate-limit; чанки по 50.
           purge_chunk() {
             local body
-            body=$(printf '%s\n' "$@" | jq -R . | jq -sc '{path: ., throttle: false}')
+            body=$(printf '%s\n' "$@" | jq -R . | jq -sc '{path: .}')
             curl -fsSL --retry 3 --retry-delay 2 -X POST \
               -H 'content-type: application/json' -d "$body" \
               https://purge.jsdelivr.net/ | head -c 300 || true
