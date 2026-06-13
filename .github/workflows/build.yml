@@ -1,0 +1,139 @@
+name: Build geo
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '20 3 * * *'
+  push:
+    branches:
+      - master
+    paths-ignore:
+      - "README.md"
+      - ".gitignore"
+      - "LICENSE"
+      - "release/**"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    env:
+      CURL: "curl -fsSL --retry 3 --retry-delay 2 --retry-connrefused"
+    steps:
+      - name: Checkout codebase
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Checkout v2fly/domain-list-community (geosite compiler + canonical data)
+        uses: actions/checkout@v4
+        with:
+          repository: v2fly/domain-list-community
+          path: community
+          fetch-depth: 1
+
+      - name: Checkout hydraponique/roscomvpn-geosite (overlay data)
+        uses: actions/checkout@v4
+        with:
+          repository: hydraponique/roscomvpn-geosite
+          path: roscomvpn-geosite
+          fetch-depth: 1
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: community/go.mod
+          cache: true
+          cache-dependency-path: community/go.sum
+
+      - name: Build merged geosite.dat
+        run: |
+          set -euo pipefail
+
+          # roscomvpn data files have NO include: directives (verified) -> safe to
+          # rename to roscomvpn-<name> and drop alongside the full v2fly data set.
+          # Category code in the .dat = uppercased filename, so geosite:roscomvpn-<name>
+          # becomes addressable while canonical v2fly categories keep their names.
+          count=0
+          for f in roscomvpn-geosite/data/*; do
+            name=$(basename "$f")
+            cp "$f" "community/data/roscomvpn-${name}"
+            count=$((count+1))
+          done
+          echo "Overlaid $count roscomvpn categories (prefixed roscomvpn-)"
+
+          mkdir -p /tmp/out
+          pushd community >/dev/null
+          go run ./ -outputdir=/tmp/out
+          popd >/dev/null
+
+          test -s /tmp/out/dlc.dat
+          cp -f /tmp/out/dlc.dat ./geosite.dat
+          ls -l ./geosite.dat
+
+      - name: Sanity check geosite namespaces
+        run: |
+          set -euo pipefail
+          # Country codes are stored as plaintext uppercase strings inside the .dat.
+          echo "== canonical v2fly categories (sample) =="
+          for c in GOOGLE NETFLIX CATEGORY-ADS DISCORD INSTAGRAM TWITTER; do
+            if strings geosite.dat | grep -qx "$c"; then echo "  ok: $c"; else echo "  MISSING: $c"; fi
+          done
+          echo "== roscomvpn-prefixed categories (sample) =="
+          for c in ROSCOMVPN-CATEGORY-RU ROSCOMVPN-WHITELIST ROSCOMVPN-CATEGORY-GEOBLOCK-RU; do
+            if strings geosite.dat | grep -qx "$c"; then echo "  ok: $c"; else echo "  MISSING: $c"; fi
+          done
+          # Hard gate: at least one canonical AND one roscomvpn category must exist.
+          strings geosite.dat | grep -qx GOOGLE
+          strings geosite.dat | grep -qx ROSCOMVPN-CATEGORY-RU
+          echo "roscomvpn category count in dat:"
+          strings geosite.dat | grep -c '^ROSCOMVPN-' || true
+
+      - name: Set tag
+        run: |
+          DAILY_TAG=$(date +%Y%m%d%H%M)
+          echo "DAILY_TAG=$DAILY_TAG" >> "$GITHUB_ENV"
+
+      - name: Prepare release directory
+        run: |
+          set -euo pipefail
+          rm -rf release
+          mkdir -p release
+          cp ./geosite.dat release/
+          sha256sum release/geosite.dat > release/geosite.dat.sha256
+          ls -l release/
+
+      - name: Push to release branch
+        run: |
+          set -euo pipefail
+          cd release
+          git init -q
+          git config --local user.name "geo-bot"
+          git config --local user.email "geo-bot@users.noreply.github.com"
+          git checkout -q -b release
+          git add -A
+          git commit -q -m "Release ${DAILY_TAG}"
+          git remote add origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}"
+          git push -f -q -u origin release
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.DAILY_TAG }}
+          name: ${{ env.DAILY_TAG }}
+          prerelease: false
+          draft: false
+          files: |
+            release/geosite.dat
+            release/geosite.dat.sha256
+
+      - name: Purge jsDelivr CDN
+        run: |
+          set -euo pipefail
+          for path in \
+            "gh/${{ github.repository }}@release/geosite.dat" \
+            "gh/${{ github.repository }}@release/geosite.dat.sha256" ; do
+            ${{ env.CURL }} -i "https://purge.jsdelivr.net/${path}" || true
+          done
