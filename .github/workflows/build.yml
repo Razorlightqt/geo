@@ -48,6 +48,7 @@ jobs:
           cache: true
           cache-dependency-path: community/go.sum
 
+      # ---------- geosite ----------
       - name: Build merged geosite.dat
         run: |
           set -euo pipefail
@@ -78,7 +79,7 @@ jobs:
           set -euo pipefail
           # Country codes are stored as plaintext uppercase strings inside the .dat.
           echo "== canonical v2fly categories (sample) =="
-          for c in GOOGLE NETFLIX CATEGORY-ADS DISCORD INSTAGRAM TWITTER; do
+          for c in GOOGLE NETFLIX CATEGORY-ADS DISCORD TWITTER; do
             if strings geosite.dat | grep -qx "$c"; then echo "  ok: $c"; else echo "  MISSING: $c"; fi
           done
           echo "== roscomvpn-prefixed categories (sample) =="
@@ -88,9 +89,43 @@ jobs:
           # Hard gate: at least one canonical AND one roscomvpn category must exist.
           strings geosite.dat | grep -qx GOOGLE
           strings geosite.dat | grep -qx ROSCOMVPN-CATEGORY-RU
-          echo "roscomvpn category count in dat:"
-          strings geosite.dat | grep -c '^ROSCOMVPN-' || true
+          echo "roscomvpn geosite category count: $(strings geosite.dat | grep -c '^ROSCOMVPN-' || true)"
 
+      # ---------- geoip ----------
+      - name: Build merged geoip.dat
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/geoip
+          # General base: Loyalsoldier/geoip (MaxMind + dbip + curated; canonical codes RU/PRIVATE/CN/TELEGRAM/...).
+          $CURL -o /tmp/geoip/general.dat https://github.com/Loyalsoldier/geoip/releases/latest/download/geoip.dat
+          # Overlay: roscomvpn-geoip (RKN-tuned: DIRECT/WHITELIST/PRIVATE/...) -> prefixed ROSCOMVPN-.
+          $CURL -o /tmp/geoip/roscom.dat https://github.com/hydraponique/roscomvpn-geoip/releases/latest/download/geoip.dat
+          ls -l /tmp/geoip
+
+          pushd tools/mergegeoip >/dev/null
+          go mod tidy
+          go run . /tmp/geoip/general.dat /tmp/geoip/roscom.dat "ROSCOMVPN-" "$GITHUB_WORKSPACE/geoip.dat"
+          popd >/dev/null
+
+          test -s ./geoip.dat
+          ls -l ./geoip.dat
+
+      - name: Sanity check geoip namespaces
+        run: |
+          set -euo pipefail
+          echo "== canonical geoip (sample) =="
+          for c in RU PRIVATE CN TELEGRAM CLOUDFLARE; do
+            if strings geoip.dat | grep -qx "$c"; then echo "  ok: $c"; else echo "  MISSING: $c"; fi
+          done
+          echo "== roscomvpn-prefixed geoip (sample) =="
+          for c in ROSCOMVPN-WHITELIST ROSCOMVPN-DIRECT ROSCOMVPN-PRIVATE; do
+            if strings geoip.dat | grep -qx "$c"; then echo "  ok: $c"; else echo "  MISSING: $c"; fi
+          done
+          strings geoip.dat | grep -qx RU
+          strings geoip.dat | grep -qx ROSCOMVPN-WHITELIST
+          echo "roscomvpn geoip category count: $(strings geoip.dat | grep -c '^ROSCOMVPN-' || true)"
+
+      # ---------- publish ----------
       - name: Set tag
         run: |
           DAILY_TAG=$(date +%Y%m%d%H%M)
@@ -102,7 +137,9 @@ jobs:
           rm -rf release
           mkdir -p release
           cp ./geosite.dat release/
+          cp ./geoip.dat release/
           sha256sum release/geosite.dat > release/geosite.dat.sha256
+          sha256sum release/geoip.dat  > release/geoip.dat.sha256
           ls -l release/
 
       - name: Push to release branch
@@ -128,12 +165,16 @@ jobs:
           files: |
             release/geosite.dat
             release/geosite.dat.sha256
+            release/geoip.dat
+            release/geoip.dat.sha256
 
       - name: Purge jsDelivr CDN
         run: |
           set -euo pipefail
           for path in \
             "gh/${{ github.repository }}@release/geosite.dat" \
-            "gh/${{ github.repository }}@release/geosite.dat.sha256" ; do
-            ${{ env.CURL }} -i "https://purge.jsdelivr.net/${path}" || true
+            "gh/${{ github.repository }}@release/geosite.dat.sha256" \
+            "gh/${{ github.repository }}@release/geoip.dat" \
+            "gh/${{ github.repository }}@release/geoip.dat.sha256" ; do
+            $CURL -i "https://purge.jsdelivr.net/${path}" || true
           done
