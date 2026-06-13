@@ -248,10 +248,34 @@ jobs:
       - name: Purge jsDelivr CDN
         run: |
           set -euo pipefail
-          for path in \
-            "gh/${{ github.repository }}@release/geosite.dat" \
-            "gh/${{ github.repository }}@release/geosite.dat.sha256" \
-            "gh/${{ github.repository }}@release/geoip.dat" \
-            "gh/${{ github.repository }}@release/geoip.dat.sha256" ; do
-            $CURL -i "https://purge.jsdelivr.net/${path}" || true
+          REPO="${{ github.repository }}"
+          # Purge EVERY published file (incl. sing-box .srs) — иначе jsDelivr держит
+          # stale объект (поймано: geoip.dat >20 MiB версия отдавала 403 после ужатия).
+          mapfile -t paths < <(cd release && find . -type f | sed "s|^\./|/gh/${REPO}@release/|" | sort)
+          echo "files to purge: ${#paths[@]}"
+          # Batch purge API (POST) — без per-file GET rate-limit; чанки по 50.
+          purge_chunk() {
+            local body
+            body=$(printf '%s\n' "$@" | jq -R . | jq -sc '{path: ., throttle: false}')
+            curl -fsSL --retry 3 --retry-delay 2 -X POST \
+              -H 'content-type: application/json' -d "$body" \
+              https://purge.jsdelivr.net/ | head -c 300 || true
+            echo
+          }
+          chunk=()
+          for p in "${paths[@]}"; do
+            chunk+=("$p")
+            if [ "${#chunk[@]}" -ge 50 ]; then purge_chunk "${chunk[@]}"; chunk=(); fi
+          done
+          [ "${#chunk[@]}" -gt 0 ] && purge_chunk "${chunk[@]}"
+          # Verify .dat re-cache as 200 (ловит класс «stale 403 после ужатия»); до 6×5с.
+          for f in geosite.dat geoip.dat; do
+            ok=0
+            for i in 1 2 3 4 5 6; do
+              code=$(curl -s -o /dev/null -w '%{http_code}' "https://cdn.jsdelivr.net/gh/${REPO}@release/${f}" || echo 000)
+              echo "verify ${f} (try ${i}): ${code}"
+              if [ "$code" = "200" ]; then ok=1; break; fi
+              sleep 5
+            done
+            [ "$ok" = "1" ] || { echo "ERROR: ${f} not 200 on jsDelivr after purge"; exit 1; }
           done
