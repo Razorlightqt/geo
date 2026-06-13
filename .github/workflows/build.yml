@@ -108,7 +108,7 @@ jobs:
           list=$(echo $SRS | tr ' ' ',')
 
           # exportlists flattens include: into plaintext "<type>:<value>[:@attr]" per category.
-          rm -rf /tmp/lists /tmp/srs && mkdir -p /tmp/lists /tmp/srs
+          rm -rf /tmp/lists /tmp/srs && mkdir -p /tmp/lists /tmp/srs/geosite
           pushd community >/dev/null
           go run ./ -outputdir=/tmp/lists -exportlists="$list" >/dev/null
           popd >/dev/null
@@ -131,14 +131,14 @@ jobs:
                 | .rules[0] |= with_entries(select(.value | length > 0))
                 | if (.rules[0] | length) == 0 then .rules = [] else . end
               ' > /tmp/j.json
-            sing-box rule-set compile --output "/tmp/srs/${name}.srs" /tmp/j.json
+            sing-box rule-set compile --output "/tmp/srs/geosite/${name}.srs" /tmp/j.json
             n=$((n+1))
           done
           echo "compiled ${n} geosite .srs, skipped ${skip}"
-          ls -l /tmp/srs | head -30
+          ls -l /tmp/srs/geosite | head -30
           # gate: a roscomvpn-* and a canonical must exist
-          test -s /tmp/srs/roscomvpn-category-ru.srs
-          test -s /tmp/srs/discord.srs
+          test -s /tmp/srs/geosite/roscomvpn-category-ru.srs
+          test -s /tmp/srs/geosite/discord.srs
 
       # ---------- geoip ----------
       - name: Build merged geoip.dat
@@ -153,7 +153,7 @@ jobs:
 
           pushd tools/mergegeoip >/dev/null
           go mod tidy
-          IPV4_ONLY=1 go run . /tmp/geoip/general.dat /tmp/geoip/roscom.dat "ROSCOMVPN-" "$GITHUB_WORKSPACE/geoip.dat"
+          IPV4_ONLY=1 GEOIP_SRS_DIR=/tmp/geoip-cidr go run . /tmp/geoip/general.dat /tmp/geoip/roscom.dat "ROSCOMVPN-" "$GITHUB_WORKSPACE/geoip.dat"
           popd >/dev/null
 
           test -s ./geoip.dat
@@ -180,6 +180,26 @@ jobs:
           strings -n 2 geoip.dat | grep -qx ROSCOMVPN-WHITELIST
           echo "roscomvpn geoip category count: $(strings -n 2 geoip.dat | grep -c '^ROSCOMVPN-' || true)"
 
+      # ---------- geoip .srs (sing-box) ----------
+      - name: Build geoip .srs (curated set, IPv4)
+        run: |
+          set -euo pipefail
+          # per-category IPv4 CIDR text dumped by mergegeoip (GEOIP_SRS_DIR) -> ip rule-set .srs.
+          GEOIP_SRS="ru private cn cloudflare cloudfront google facebook fastly netflix telegram twitter tor roscomvpn-direct roscomvpn-whitelist roscomvpn-private"
+          mkdir -p /tmp/srs/geoip
+          n=0; skip=0
+          for name in $GEOIP_SRS; do
+            txt="/tmp/geoip-cidr/${name}.txt"
+            if [ ! -s "$txt" ]; then echo "  skip (no cidr): $name"; skip=$((skip+1)); continue; fi
+            jq -Rn '{version:3, rules:[{ip_cidr:[inputs | select(length>0)]}]}' < "$txt" > /tmp/jip.json
+            sing-box rule-set compile --output "/tmp/srs/geoip/${name}.srs" /tmp/jip.json
+            n=$((n+1))
+          done
+          echo "compiled ${n} geoip .srs, skipped ${skip}"
+          ls -l /tmp/srs/geoip | head
+          test -s /tmp/srs/geoip/ru.srs
+          test -s /tmp/srs/geoip/roscomvpn-whitelist.srs
+
       # ---------- publish ----------
       - name: Set tag
         run: |
@@ -193,10 +213,11 @@ jobs:
           mkdir -p release/sing-box
           cp ./geosite.dat release/
           cp ./geoip.dat release/
-          cp /tmp/srs/*.srs release/sing-box/
+          cp -r /tmp/srs/geosite release/sing-box/geosite
+          cp -r /tmp/srs/geoip   release/sing-box/geoip
           sha256sum release/geosite.dat > release/geosite.dat.sha256
           sha256sum release/geoip.dat  > release/geoip.dat.sha256
-          ls -l release/ release/sing-box/ | head -40
+          ls -l release/ release/sing-box/geosite release/sing-box/geoip | head -60
 
       - name: Push to release branch
         run: |

@@ -12,6 +12,8 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"google.golang.org/protobuf/proto"
 )
@@ -39,6 +41,12 @@ func main() {
 	}
 	general.Entry = append(general.Entry, overlay.GetEntry()...)
 
+	// Optional: dump per-category IPv4 CIDR text (one CIDR per line) for sing-box .srs.
+	// Filename = lowercased country_code (e.g. ru.txt, roscomvpn-whitelist.txt).
+	if dir := os.Getenv("GEOIP_SRS_DIR"); dir != "" {
+		dumpCIDR(general, dir)
+	}
+
 	out, err := proto.Marshal(general)
 	if err != nil {
 		fatal("marshal", err)
@@ -49,6 +57,27 @@ func main() {
 	fmt.Printf("merged: %d general + %d overlay (prefixed %q) = %d entries -> %s (%d bytes)\n",
 		len(general.GetEntry())-len(overlay.GetEntry()), len(overlay.GetEntry()), prefix,
 		len(general.GetEntry()), outPath, len(out))
+}
+
+// dumpCIDR writes per-category IPv4 CIDR text files (one "a.b.c.d/p" per line) into dir.
+func dumpCIDR(l *GeoIPList, dir string) {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		fatal("mkdir "+dir, err)
+	}
+	for _, e := range l.GetEntry() {
+		var b strings.Builder
+		for _, c := range e.GetCidr() {
+			ip := c.GetIp()
+			if len(ip) != 4 {
+				continue
+			}
+			fmt.Fprintf(&b, "%d.%d.%d.%d/%d\n", ip[0], ip[1], ip[2], ip[3], c.GetPrefix())
+		}
+		name := strings.ToLower(e.GetCountryCode())
+		if err := os.WriteFile(filepath.Join(dir, name+".txt"), []byte(b.String()), 0o644); err != nil {
+			fatal("write cidr "+name, err)
+		}
+	}
 }
 
 // keepIPv4 strips IPv6 CIDRs (ip length 16) from every entry, keeping IPv4 (length 4).
