@@ -26,6 +26,14 @@ func main() {
 	general := load(generalPath)
 	overlay := load(overlayPath)
 
+	// Drop IPv6 CIDRs when IPV4_ONLY=1: the client runs queryStrategy UseIPv4,
+	// so v6 ranges are dead weight — and dropping them keeps geoip.dat under
+	// jsDelivr's 20 MB per-file limit.
+	if os.Getenv("IPV4_ONLY") == "1" {
+		keepIPv4(general)
+		keepIPv4(overlay)
+	}
+
 	for _, e := range overlay.GetEntry() {
 		e.CountryCode = prefix + e.GetCountryCode()
 	}
@@ -41,6 +49,19 @@ func main() {
 	fmt.Printf("merged: %d general + %d overlay (prefixed %q) = %d entries -> %s (%d bytes)\n",
 		len(general.GetEntry())-len(overlay.GetEntry()), len(overlay.GetEntry()), prefix,
 		len(general.GetEntry()), outPath, len(out))
+}
+
+// keepIPv4 strips IPv6 CIDRs (ip length 16) from every entry, keeping IPv4 (length 4).
+func keepIPv4(l *GeoIPList) {
+	for _, e := range l.GetEntry() {
+		kept := e.GetCidr()[:0]
+		for _, c := range e.GetCidr() {
+			if len(c.GetIp()) == 4 {
+				kept = append(kept, c)
+			}
+		}
+		e.Cidr = kept
+	}
 }
 
 func load(path string) *GeoIPList {

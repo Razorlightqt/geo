@@ -104,11 +104,17 @@ jobs:
 
           pushd tools/mergegeoip >/dev/null
           go mod tidy
-          go run . /tmp/geoip/general.dat /tmp/geoip/roscom.dat "ROSCOMVPN-" "$GITHUB_WORKSPACE/geoip.dat"
+          IPV4_ONLY=1 go run . /tmp/geoip/general.dat /tmp/geoip/roscom.dat "ROSCOMVPN-" "$GITHUB_WORKSPACE/geoip.dat"
           popd >/dev/null
 
           test -s ./geoip.dat
           ls -l ./geoip.dat
+          # jsDelivr refuses GitHub files > 20 MiB (20971520 B). Fail loud with margin.
+          sz=$(stat -c%s ./geoip.dat)
+          echo "geoip.dat size: ${sz} bytes"
+          if [ "$sz" -gt 20500000 ]; then
+            echo "ERROR: geoip.dat ${sz} B exceeds jsDelivr 20 MiB limit (margin 20.5 MB)"; exit 1
+          fi
 
       - name: Sanity check geoip namespaces
         run: |
