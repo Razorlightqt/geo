@@ -98,13 +98,13 @@ jobs:
           $CURL https://sing-box.app/install.sh | sudo -E sh -s -- --version 1.13.13
           sing-box version
 
-      - name: Build geosite .srs (curated set, includes resolved via exportlists)
+      - name: Build geosite .srs (FULL set — all categories, includes resolved via exportlists)
         run: |
           set -euo pipefail
-          # Curated canonical services + all roscomvpn-* (overlay). NOT the full 1496
-          # (would mean a huge release + jsDelivr purge rate-limit). Expand as needed.
-          SRS="discord instagram twitter tiktok openai spotify reddit youtube google netflix telegram github steam whatsapp signal facebook meta cloudflare category-ads-all category-ru category-gov-ru"
-          for f in roscomvpn-geosite/data/*; do SRS="$SRS roscomvpn-$(basename "$f")"; done
+          # FULL coverage: every category present in community/data after the roscomvpn
+          # overlay (canonical v2fly + roscomvpn-*). One .srs per geosite tag.
+          SRS=$(for f in community/data/*; do [ -f "$f" ] && basename "$f"; done | sort -u | tr '\n' ' ')
+          echo "geosite categories to compile: $(echo $SRS | wc -w)"
           list=$(echo $SRS | tr ' ' ',')
 
           # exportlists flattens include: into plaintext "<type>:<value>[:@attr]" per category.
@@ -117,7 +117,7 @@ jobs:
           for name in $SRS; do
             lc=$(echo "$name" | tr 'A-Z' 'a-z')
             txt="/tmp/lists/${lc}.txt"
-            if [ ! -s "$txt" ]; then echo "  skip (no export): $name"; skip=$((skip+1)); continue; fi
+            if [ ! -s "$txt" ]; then skip=$((skip+1)); continue; fi
             awk '{ i=index($0,":"); if(i==0) next; t=substr($0,1,i-1); r=substr($0,i+1); j=index(r,":@"); if(j>0) r=substr(r,1,j-1); if(r=="") next;
                    if(t=="domain") print "suffix\t" r; else if(t=="full") print "domain\t" r; else if(t=="keyword") print "keyword\t" r; else if(t=="regexp") print "regex\t" r }' "$txt" \
             | jq -Rn '
@@ -131,14 +131,18 @@ jobs:
                 | .rules[0] |= with_entries(select(.value | length > 0))
                 | if (.rules[0] | length) == 0 then .rules = [] else . end
               ' > /tmp/j.json
-            sing-box rule-set compile --output "/tmp/srs/geosite/${name}.srs" /tmp/j.json
+            # skip categories that flatten to an empty rule-set (sing-box rejects those)
+            if jq -e '(.rules | length) == 0' /tmp/j.json >/dev/null; then skip=$((skip+1)); continue; fi
+            if ! sing-box rule-set compile --output "/tmp/srs/geosite/${name}.srs" /tmp/j.json 2>/dev/null; then
+              rm -f "/tmp/srs/geosite/${name}.srs"; skip=$((skip+1)); continue
+            fi
             n=$((n+1))
           done
-          echo "compiled ${n} geosite .srs, skipped ${skip}"
-          ls -l /tmp/srs/geosite | head -30
-          # gate: a roscomvpn-* and a canonical must exist
+          echo "compiled ${n} geosite .srs, skipped ${skip} (empty export)"
+          # gate: roscomvpn-* and canonical anchors must exist
           test -s /tmp/srs/geosite/roscomvpn-category-ru.srs
           test -s /tmp/srs/geosite/discord.srs
+          test -s /tmp/srs/geosite/google.srs
 
       # ---------- geoip ----------
       - name: Build merged geoip.dat
@@ -181,22 +185,24 @@ jobs:
           echo "roscomvpn geoip category count: $(strings -n 2 geoip.dat | grep -c '^ROSCOMVPN-' || true)"
 
       # ---------- geoip .srs (sing-box) ----------
-      - name: Build geoip .srs (curated set, IPv4)
+      - name: Build geoip .srs (FULL set, IPv4)
         run: |
           set -euo pipefail
-          # per-category IPv4 CIDR text dumped by mergegeoip (GEOIP_SRS_DIR) -> ip rule-set .srs.
-          GEOIP_SRS="ru private cn cloudflare cloudfront google facebook fastly netflix telegram twitter tor roscomvpn-direct roscomvpn-whitelist roscomvpn-private"
+          # FULL coverage: one .srs per geoip category dumped by mergegeoip
+          # (all canonical Loyalsoldier + ISO country codes + roscomvpn-*, IPv4-only).
           mkdir -p /tmp/srs/geoip
           n=0; skip=0
-          for name in $GEOIP_SRS; do
-            txt="/tmp/geoip-cidr/${name}.txt"
-            if [ ! -s "$txt" ]; then echo "  skip (no cidr): $name"; skip=$((skip+1)); continue; fi
+          for txt in /tmp/geoip-cidr/*.txt; do
+            [ -e "$txt" ] || continue
+            name=$(basename "$txt" .txt)
+            if [ ! -s "$txt" ]; then skip=$((skip+1)); continue; fi
             jq -Rn '{version:3, rules:[{ip_cidr:[inputs | select(length>0)]}]}' < "$txt" > /tmp/jip.json
-            sing-box rule-set compile --output "/tmp/srs/geoip/${name}.srs" /tmp/jip.json
+            if ! sing-box rule-set compile --output "/tmp/srs/geoip/${name}.srs" /tmp/jip.json 2>/dev/null; then
+              rm -f "/tmp/srs/geoip/${name}.srs"; skip=$((skip+1)); continue
+            fi
             n=$((n+1))
           done
           echo "compiled ${n} geoip .srs, skipped ${skip}"
-          ls -l /tmp/srs/geoip | head
           test -s /tmp/srs/geoip/ru.srs
           test -s /tmp/srs/geoip/roscomvpn-whitelist.srs
 
