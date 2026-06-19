@@ -211,6 +211,9 @@ jobs:
         run: |
           DAILY_TAG=$(date +%Y%m%d%H%M)
           echo "DAILY_TAG=$DAILY_TAG" >> "$GITHUB_ENV"
+          # Epoch stamp for the R.A.M. autorouting profile (routing.json). Client
+          # re-pulls geo only when LastUpdated grows -> stamp every build.
+          echo "LASTUPDATED=$(date +%s)" >> "$GITHUB_ENV"
 
       - name: Prepare release directory
         run: |
@@ -223,6 +226,19 @@ jobs:
           cp -r /tmp/srs/geoip   release/sing-box/geoip
           sha256sum release/geosite.dat > release/geosite.dat.sha256
           sha256sum release/geoip.dat  > release/geoip.dat.sha256
+
+          # R.A.M. autorouting profile (plain JSON, NOT base64). Delivered to Happ/INCY
+          # clients via the `autorouting` subscription header -> client self-updates geo.
+          # Trimmed to geo carrier fields: Geoip/Geositeurl + LastUpdated (epoch stamp).
+          # UseChunkFiles:"false" is mandatory — guards CutGeoData() from collapsing the
+          # base to zero (rules live in the client xray-json body, not in this profile).
+          REPO="${{ github.repository }}"
+          # printf (no heredoc — indented heredoc delimiters don't terminate inside YAML run blocks)
+          printf '{\n  "Name": "R.A.M.",\n  "UseChunkFiles": "false",\n  "Geoipurl": "https://cdn.jsdelivr.net/gh/%s@release/geoip.dat",\n  "Geositeurl": "https://cdn.jsdelivr.net/gh/%s@release/geosite.dat",\n  "LastUpdated": "%s"\n}\n' "$REPO" "$REPO" "$LASTUPDATED" > release/routing.json
+          # fail loud if invalid JSON
+          python3 -c "import json; json.load(open('release/routing.json')); print('routing.json OK')"
+          cat release/routing.json
+
           echo "release: geosite .srs=$(find release/sing-box/geosite -name '*.srs' | wc -l), geoip .srs=$(find release/sing-box/geoip -name '*.srs' | wc -l)"
           ls -l release/
 
@@ -278,7 +294,7 @@ jobs:
           # Verify .dat re-cache as 200 (ловит класс «stale 403 после ужатия»). Батч-POST
           # для крупного geoip обрабатывается асинхронно и медленно → внутри цикла
           # дополнительно дёргаем быстрый GET-purge до 200; до 10×6с.
-          for f in geosite.dat geoip.dat; do
+          for f in geosite.dat geoip.dat routing.json; do
             ok=0
             for i in $(seq 1 10); do
               code=$(curl -s -o /dev/null -w '%{http_code}' "https://cdn.jsdelivr.net/gh/${REPO}@release/${f}" || echo 000)
