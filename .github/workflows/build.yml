@@ -65,31 +65,66 @@ jobs:
           done
           echo "Overlaid $count roscomvpn categories (prefixed roscomvpn-)"
 
+          # ---------- max-detection (INFRA-110): VPN / IP-probe detect domains ----------
+          # Latest release of fatyzzz/max-list (regenerated regularly) — two plain newline-
+          # separated domain lists (release ASSETS, not raw master). Merge+dedup into a v2fly
+          # data file community/data/max-detection: a bare line = suffix match (gstatic.com
+          # catches www.gstatic.com). Compiler emits category MAX-DETECTION (uppercased
+          # filename) -> addressable as geosite:max-detection, picked up by both the .dat
+          # (slim, it's in used-tags.txt) and the full .srs set (community/data/* loop).
+          # Fetch failure ABORTS the build (set -e + curl -f) — last-good release stays served
+          # (build-decoupled-from-serve). gstatic.com here does NOT affect burstObservatory:
+          # its probes bypass routing via DialTaggedOutbound (verified, INFRA-110).
+          MAXL=/tmp/max-list && mkdir -p "$MAXL"
+          for a in ip-check-formatted.txt vpndetect.txt; do
+            $CURL -o "$MAXL/$a" "https://github.com/fatyzzz/max-list/releases/latest/download/$a"
+          done
+          cat "$MAXL"/ip-check-formatted.txt "$MAXL"/vpndetect.txt \
+            | tr -d '\r' | tr 'A-Z' 'a-z' | sed 's/[[:space:]]//g' \
+            | grep -E '^[a-z0-9.-]+\.[a-z]{2,}$' \
+            | sort -u > community/data/max-detection
+          mc=$(grep -c . community/data/max-detection || true)
+          echo "max-detection: ${mc} domains"; cat community/data/max-detection
+          # Floor guard: a healthy fetch yields ~15 domains; <5 means truncated/garbage fetch.
+          [ "$mc" -ge 5 ] || { echo "ERROR: max-detection only ${mc} domains — fetch likely broken"; exit 1; }
+
           mkdir -p /tmp/out
           pushd community >/dev/null
           go run ./ -outputdir=/tmp/out
           popd >/dev/null
 
           test -s /tmp/out/dlc.dat
-          cp -f /tmp/out/dlc.dat ./geosite.dat
+          # Full geosite.dat is TRANSIENT (/tmp) — never published. Slim it to the used-tag
+          # allowlist (INFRA-109, Variant B): only categories referenced by the 3 client
+          # profiles ship in the client .dat. The .srs below stay FULL (built from exportlists,
+          # independent of this file). filtergeosite fails the build if any used geosite tag is
+          # absent from the compiled base (drift guard — catches typos / upstream renames).
+          pushd tools/filtergeosite >/dev/null
+          go mod tidy
+          go run . /tmp/out/dlc.dat "$GITHUB_WORKSPACE/used-tags.txt" "$GITHUB_WORKSPACE/geosite.dat"
+          popd >/dev/null
+
+          test -s ./geosite.dat
+          echo "geosite.dat full $(stat -c%s /tmp/out/dlc.dat) B -> slim $(stat -c%s ./geosite.dat) B"
           ls -l ./geosite.dat
 
-      - name: Sanity check geosite namespaces
+      - name: Sanity check slim geosite.dat
         run: |
           set -euo pipefail
-          # Country codes are stored as plaintext uppercase strings inside the .dat.
-          echo "== canonical v2fly categories (sample) =="
-          for c in GOOGLE NETFLIX CATEGORY-ADS DISCORD TWITTER; do
-            if strings geosite.dat | grep -qx "$c"; then echo "  ok: $c"; else echo "  MISSING: $c"; fi
+          # geosite.dat is now SLIM (used-tag allowlist). All anchors below are in the used set.
+          # Category codes are plaintext uppercase strings inside the .dat.
+          # MAX-DETECTION (INFRA-110) must survive slimming — it's in used-tags.txt and is the
+          # dynamic fatyzzz/max-list category; its presence here proves it compiled + was kept.
+          echo "== used categories present (sample) =="
+          for c in GOOGLE NETFLIX CATEGORY-ADS DISCORD TWITTER ROSCOMVPN-CATEGORY-RU ROSCOMVPN-WHITELIST ROSCOMVPN-CATEGORY-GEOBLOCK-RU MAX-DETECTION; do
+            if strings geosite.dat | grep -qx "$c"; then echo "  ok: $c"; else echo "  MISSING used anchor: $c"; exit 1; fi
           done
-          echo "== roscomvpn-prefixed categories (sample) =="
-          for c in ROSCOMVPN-CATEGORY-RU ROSCOMVPN-WHITELIST ROSCOMVPN-CATEGORY-GEOBLOCK-RU; do
-            if strings geosite.dat | grep -qx "$c"; then echo "  ok: $c"; else echo "  MISSING: $c"; fi
-          done
-          # Hard gate: at least one canonical AND one roscomvpn category must exist.
-          strings geosite.dat | grep -qx GOOGLE
-          strings geosite.dat | grep -qx ROSCOMVPN-CATEGORY-RU
-          echo "roscomvpn geosite category count: $(strings geosite.dat | grep -c '^ROSCOMVPN-' || true)"
+          # Slim proof: the full transient base is ~2.3 MB; slim must be well under it.
+          # (Completeness of the used set is enforced inside filtergeosite — build fails on any
+          #  missing used tag — so this only needs to confirm slimming actually happened.)
+          sz=$(stat -c%s geosite.dat)
+          echo "slim geosite.dat size: ${sz} B"
+          [ "$sz" -lt 1500000 ] || { echo "ERROR: geosite.dat ${sz} B too large — slimming likely failed"; exit 1; }
 
       # ---------- geosite .srs (sing-box) ----------
       - name: Install sing-box (compile .srs, prod-compatible 1.13.13)
@@ -157,32 +192,39 @@ jobs:
 
           pushd tools/mergegeoip >/dev/null
           go mod tidy
-          IPV4_ONLY=1 GEOIP_SRS_DIR=/tmp/geoip-cidr go run . /tmp/geoip/general.dat /tmp/geoip/roscom.dat "ROSCOMVPN-" "$GITHUB_WORKSPACE/geoip.dat"
+          # USED_TAGS_FILE slims the PUBLISHED geoip.dat to the used-tag allowlist (INFRA-109).
+          # GEOIP_SRS_DIR dump happens BEFORE the slim inside the tool, so node .srs stay FULL.
+          # mergegeoip fails the build if any used geoip tag is absent from the merged set.
+          IPV4_ONLY=1 GEOIP_SRS_DIR=/tmp/geoip-cidr USED_TAGS_FILE="$GITHUB_WORKSPACE/used-tags.txt" \
+            go run . /tmp/geoip/general.dat /tmp/geoip/roscom.dat "ROSCOMVPN-" "$GITHUB_WORKSPACE/geoip.dat"
           popd >/dev/null
 
           test -s ./geoip.dat
           ls -l ./geoip.dat
-          # jsDelivr refuses GitHub files > 20 MiB (20971520 B). Fail loud with margin.
+          # jsDelivr refuses GitHub files > 20 MiB. Slim geoip.dat is ~50 KB — check kept as a
+          # cheap floor/ceiling guard (also catches a full .dat accidentally shipping).
           sz=$(stat -c%s ./geoip.dat)
           echo "geoip.dat size: ${sz} bytes"
           if [ "$sz" -gt 20500000 ]; then
             echo "ERROR: geoip.dat ${sz} B exceeds jsDelivr 20 MiB limit (margin 20.5 MB)"; exit 1
           fi
+          if [ "$sz" -gt 1000000 ]; then
+            echo "ERROR: geoip.dat ${sz} B too large for a slim build — slimming likely failed"; exit 1
+          fi
 
-      - name: Sanity check geoip namespaces
+      - name: Sanity check slim geoip.dat
         run: |
           set -euo pipefail
-          echo "== canonical geoip (sample) =="
-          for c in RU PRIVATE CN TELEGRAM CLOUDFLARE; do
-            if strings -n 2 geoip.dat | grep -qx "$c"; then echo "  ok: $c"; else echo "  MISSING: $c"; fi
+          # geoip.dat is now SLIM — exactly the 10 used geoip codes (all canonical, no roscomvpn).
+          echo "== used geoip present (all 10) =="
+          for c in CLOUDFLARE CLOUDFRONT FACEBOOK FASTLY GOOGLE NETFLIX PRIVATE TELEGRAM TOR TWITTER; do
+            if strings -n 2 geoip.dat | grep -qx "$c"; then echo "  ok: $c"; else echo "  MISSING used geoip: $c"; exit 1; fi
           done
-          echo "== roscomvpn-prefixed geoip (sample) =="
-          for c in ROSCOMVPN-WHITELIST ROSCOMVPN-DIRECT ROSCOMVPN-PRIVATE; do
-            if strings -n 2 geoip.dat | grep -qx "$c"; then echo "  ok: $c"; else echo "  MISSING: $c"; fi
+          # Slim proof: non-used canonical codes (RU/CN) and the whole roscomvpn overlay must be ABSENT.
+          for c in RU CN ROSCOMVPN-WHITELIST ROSCOMVPN-DIRECT ROSCOMVPN-PRIVATE; do
+            if strings -n 2 geoip.dat | grep -qx "$c"; then echo "ERROR: non-used ${c} present in slim geoip.dat — slimming failed"; exit 1; fi
           done
-          strings -n 2 geoip.dat | grep -qx RU
-          strings -n 2 geoip.dat | grep -qx ROSCOMVPN-WHITELIST
-          echo "roscomvpn geoip category count: $(strings -n 2 geoip.dat | grep -c '^ROSCOMVPN-' || true)"
+          echo "slim geoip.dat OK (10 used codes, roscomvpn/RU/CN absent)"
 
       # ---------- geoip .srs (sing-box) ----------
       - name: Build geoip .srs (FULL set, IPv4)

@@ -7,12 +7,23 @@
 //	overlay.dat — its entries get PREFIX prepended to country_code
 //	PREFIX      — e.g. "ROSCOMVPN-" (codes are uppercase in the dat)
 //	out.dat     — merged output
+//
+// Env:
+//
+//	IPV4_ONLY=1        — drop IPv6 CIDRs (client runs queryStrategy UseIPv4).
+//	GEOIP_SRS_DIR=dir  — dump per-category IPv4 CIDR text (full set, for sing-box .srs).
+//	USED_TAGS_FILE=f   — slim the OUTPUT .dat to the geoip: tags in allowlist f (INFRA-109,
+//	                     Variant B). The CIDR dump (GEOIP_SRS_DIR) stays FULL — only the .dat
+//	                     is slimmed. Every used geoip tag must exist in the merged set or build
+//	                     fails (drift guard). Unset → full .dat (backward compatible).
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"google.golang.org/protobuf/proto"
@@ -39,12 +50,22 @@ func main() {
 	for _, e := range overlay.GetEntry() {
 		e.CountryCode = prefix + e.GetCountryCode()
 	}
+	nGeneral, nOverlay := len(general.GetEntry()), len(overlay.GetEntry())
 	general.Entry = append(general.Entry, overlay.GetEntry()...)
+	fmt.Printf("merged: %d general + %d overlay (prefixed %q) = %d entries\n",
+		nGeneral, nOverlay, prefix, len(general.GetEntry()))
 
 	// Optional: dump per-category IPv4 CIDR text (one CIDR per line) for sing-box .srs.
 	// Filename = lowercased country_code (e.g. ru.txt, roscomvpn-whitelist.txt).
+	// NOTE: dump happens BEFORE the used-tags slim below, so .srs stay FULL.
 	if dir := os.Getenv("GEOIP_SRS_DIR"); dir != "" {
 		dumpCIDR(general, dir)
+	}
+
+	// Optional: slim the published .dat to a used-tag allowlist (Variant B). The .srs
+	// dump above is already done with the full set, so nodes keep full coverage.
+	if f := os.Getenv("USED_TAGS_FILE"); f != "" {
+		slimToUsed(general, f)
 	}
 
 	out, err := proto.Marshal(general)
@@ -54,9 +75,7 @@ func main() {
 	if err := os.WriteFile(outPath, out, 0o644); err != nil {
 		fatal("write "+outPath, err)
 	}
-	fmt.Printf("merged: %d general + %d overlay (prefixed %q) = %d entries -> %s (%d bytes)\n",
-		len(general.GetEntry())-len(overlay.GetEntry()), len(overlay.GetEntry()), prefix,
-		len(general.GetEntry()), outPath, len(out))
+	fmt.Printf("wrote %s: %d entries, %d bytes\n", outPath, len(general.GetEntry()), len(out))
 }
 
 // dumpCIDR writes per-category IPv4 CIDR text files (one "a.b.c.d/p" per line) into dir.
@@ -78,6 +97,64 @@ func dumpCIDR(l *GeoIPList, dir string) {
 			fatal("write cidr "+name, err)
 		}
 	}
+}
+
+// slimToUsed filters l.Entry in place down to the geoip: tags in the allowlist file.
+// Guard: every requested geoip tag must exist in the merged set, else exit 1 (drift guard).
+func slimToUsed(l *GeoIPList, usedPath string) {
+	want := loadUsedGeoip(usedPath)
+	if len(want) == 0 {
+		fatal("used-tags", fmt.Errorf("no geoip: entries in %s", usedPath))
+	}
+	found := make(map[string]bool, len(want))
+	kept := l.GetEntry()[:0]
+	for _, e := range l.GetEntry() {
+		code := strings.ToUpper(e.GetCountryCode())
+		if want[code] {
+			found[code] = true
+			kept = append(kept, e)
+		}
+	}
+	var missing []string
+	for code := range want {
+		if !found[code] {
+			missing = append(missing, code)
+		}
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		fmt.Fprintf(os.Stderr, "mergegeoip: %d used geoip tag(s) NOT in merged set:\n", len(missing))
+		for _, m := range missing {
+			fmt.Fprintf(os.Stderr, "  geoip:%s\n", strings.ToLower(m))
+		}
+		os.Exit(1)
+	}
+	l.Entry = kept
+	fmt.Printf("slimmed geoip .dat: kept %d used categories\n", len(kept))
+}
+
+// loadUsedGeoip parses used-tags.txt → set of UPPERCASE geoip category codes.
+func loadUsedGeoip(path string) map[string]bool {
+	f, err := os.Open(path)
+	if err != nil {
+		fatal("open "+path, err)
+	}
+	defer f.Close()
+	set := map[string]bool{}
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if v, ok := strings.CutPrefix(line, "geoip:"); ok {
+			set[strings.ToUpper(strings.TrimSpace(v))] = true
+		}
+	}
+	if err := sc.Err(); err != nil {
+		fatal("scan "+path, err)
+	}
+	return set
 }
 
 // keepIPv4 strips IPv6 CIDRs (ip length 16) from every entry, keeping IPv4 (length 4).

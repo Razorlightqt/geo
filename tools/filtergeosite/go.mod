@@ -1,4 +1,4 @@
-module mergegeoip
+module filtergeosite
 
 go 1.23
 

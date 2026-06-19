@@ -1,0 +1,6 @@
+# Локальные планировочные артефакты роутинга (INFRA-75) — не часть гео-репо
+Routing.numbers
+Routing.csv
+
+# macOS
+.DS_Store
