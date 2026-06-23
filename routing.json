@@ -1,0 +1,7 @@
+{
+  "Name": "R.A.M.",
+  "UseChunkFiles": "false",
+  "Geoipurl": "https://cdn.jsdelivr.net/gh/Razorlightqt/geo@release/geoip.dat",
+  "Geositeurl": "https://cdn.jsdelivr.net/gh/Razorlightqt/geo@release/geosite.dat",
+  "LastUpdated": "1782198149"
+}
