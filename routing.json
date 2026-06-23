@@ -1,7 +1,7 @@
 {
   "Name": "R.A.M.",
   "UseChunkFiles": "false",
-  "Geoipurl": "https://cdn.jsdelivr.net/gh/Razorlightqt/geo@release/geoip.dat",
-  "Geositeurl": "https://cdn.jsdelivr.net/gh/Razorlightqt/geo@release/geosite.dat",
-  "LastUpdated": "1782198149"
+  "Geoipurl": "https://maps.astapor.net/e303413fd6853b1b66f3e89b92845aff/client/geoip.dat",
+  "Geositeurl": "https://maps.astapor.net/e303413fd6853b1b66f3e89b92845aff/client/geosite.dat",
+  "LastUpdated": "1782211839"
 }
